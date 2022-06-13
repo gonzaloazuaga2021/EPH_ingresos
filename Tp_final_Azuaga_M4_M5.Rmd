@@ -1,0 +1,1807 @@
+---
+title: "Entrega M3 y M4 DCSCHD-UNSAM"
+author: "Gonzalo Azuaga"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+# Carga de paquetes
+```{r, message=FALSE, warning=FALSE}
+pacman::p_load(tidyverse, caret, DataExplorer, skimr, flextable, gridExtra, grid, ppcor, glmnet, naniar, rpart.plot, lime, recipes, pdp)
+```
+
+# Importación de base de datos
+```{r, message=FALSE}
+datos <- read_csv("bases/01_2020_II_eph_ocupados.csv")
+```
+
+```{r}
+head(datos, n = 10) # visualización de los primeros 10 casos
+```
+
+El dataset a utilizar es un subconjunto de datos de la Encuesta Permanente de Hogares correspondiente (EPH) al II trimestre del 2020. Sólo están registradas las personas que declararon haber trabajado al menos una hora durante la semana anterior al operativo, es decir _ocupadas_, y se han seleccionado algunas variables para el análisis. Dicho dataset cuenta con 12803 filas, cada una de ellas representa a un individuo, y 14 variables. A continuación, se renombran las variables y se presenta una tabla con las definiciones de cada una de ellas.
+
+# Renombramiento de variables
+```{r}
+datos <- datos %>% 
+  rename(Nivel_ed = NIVEL_ED,
+         Nro_hogar = NRO_HOGAR,
+         Codusu = CODUSU,
+         Relacion = CH03,
+         Sexo = CH04,
+         Edad = CH06,
+         Estado = CH07,
+         Tipo = PP04A,
+         Intensidad = INTENSI,
+         Categoria_ocup = CAT_OCUP,
+         Total_horas = PP3E_TOT,
+         Categoria = CATEGORIA,
+         Calificacion = CALIFICACION,
+         Ingreso = P21)
+```
+
+```{r}
+data <- data.frame(Variable = names(datos)) %>%  
+  mutate(Descripción = case_when(
+    Variable == 'Nivel_ed' ~ 'máximo nivel educativo alcanzado',
+    Variable == 'Nro_hogar' ~ 'refiere al hogar dentro de la vivienda. Puede haber más de un hogar en una vivienda',
+    Variable == 'Codusu' ~ 'número de identificación que permite relacionar una vivienda con hogares y personas',
+    Variable == 'Relacion' ~ 'relación de parentesco con el jefe/a de hogar',
+    Variable == 'Estado' ~ 'estado conyugal',
+    Variable == 'Tipo' ~ 'sector del establecimiento donde trabaja (público, privado)',
+    Variable == 'Intensidad'  ~ 'intensidad de la ocupación (ocupado pleno, sobreocupado, subocupado)',
+    Variable == 'Categoria_ocup' ~'categoría ocupacional',
+    Variable == 'Total_horas' ~ 'cantidad de horas que trabajó la semana anterior en la ocupación principal',
+    Variable == 'Categoria' ~ 'carácter de la ocupación principal (basado en el CNO)',
+    Variable == 'Calificacion' ~ 'calificación de la ocupación principal (basado en el CNO)',
+    Variable == 'Ingreso' ~ 'Ingreso de la ocupación principal',
+    Variable == 'Sexo' ~'sexo',
+    Variable == 'Edad' ~'edad en años cumplidos')) 
+
+#Cambio de formato de la tabla compatible con Word
+flextable((data), 
+  col_keys = c("Variable", "Descripción" )) %>% 
+  add_header_lines(.,values = c("Cuadro 1. Definición de variables")) %>% 
+   add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., width =.5, layout = "autofit")
+
+```
+
+# Análisis exploratorio 
+```{r}
+df_skim_ch <- skim(datos) %>% 
+  filter(skim_type == "character") %>% 
+  rename(Variable = skim_variable,
+         Tipo = skim_type,
+         Vacíos = character.empty,
+         N_únicos = character.n_unique,
+         Espacios_vacíos = character.whitespace,
+         NA_s = n_missing) %>% 
+  dplyr::select(Tipo, Variable,N_únicos, Espacios_vacíos, NA_s)
+
+
+flextable((df_skim_ch), 
+  col_keys = names(df_skim_ch)) %>% 
+  add_header_lines(.,values = c("Cuadro 2. Análisis exploratorio de variables categóricas"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") 
+
+
+```
+
+```{r}
+df_skim_num <- skim(datos) %>% 
+  filter(skim_type == "numeric") %>% 
+  mutate(across(where(is.numeric),round, 2)) %>% 
+  rename(Variable = skim_variable,
+         Tipo = skim_type,
+         Media = numeric.mean, 
+         Desvío_std=numeric.sd, 
+         Mín=numeric.p0,
+         Q1=numeric.p25,
+         Mediana=numeric.p50,
+         Q3=numeric.p75,
+         Máx=numeric.p100, 
+         NA_s =n_missing) %>% 
+  dplyr::select(Tipo, Variable, !starts_with("character")) %>% 
+  dplyr::select(-complete_rate)
+
+flextable((df_skim_num), 
+  col_keys = names(df_skim_num)) %>% 
+  add_header_lines(.,values = c("Cuadro 2.1. Análisis exploratorio de variables cuantitativas"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020.") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(Media = function(x) format(round(x,2), big.mark = ""),
+               Desvío_std= function(x) format(round(x, 2), big.mark = ""), 
+               Mín= function(x) format(round(x,), big.mark = ""), 
+               Q1= function(x) format(round(x,), big.mark = ""), 
+               Mediana = function(x) format(round(x,), big.mark =""),
+               Q3 = function(x) format(round(x,), big.mark =""),
+               Máx = function(x) format(round(x,), big.mark =""))
+```
+
+A partir del Cuadro resúmen generado con la función _skim_ del paquete _skirm_ se observa que el dataset no cuenta con _missing values_ (NA's). Por otro lado, llama la atención el valor mínimo de la variable Ingreso (-9) y el máximo de la variable Total_Horas (999). A partir del Diseño de Registro y Estructura de la base de la EPH se observa que el valor -9 corresponde a la no respuesta, mientras que el 999 indica la categoría de "No sabe/no responde". Existen 1446 casos para el primero y sólo 1 para el segundo en el dataset. Por otro lado, 712 individuos reportaron un monto de ingreso de la ocupación principal de 0. Para el análisis exploratorio no se incluirán los casos de no respuesta de ambas variables.
+
+```{r}
+datos %>% 
+  filter(Ingreso == -9) %>% 
+  summarise(n = n())
+
+datos %>% 
+  filter(Ingreso == 0) %>% 
+  summarise(n = n())
+
+datos %>% 
+  filter(Total_horas == 999) %>% 
+  summarise(n = n())
+```
+
+## Características principales de las personas que no declararon ingresos
+```{r}
+datos_na <- datos %>% 
+  filter(Ingreso == -9)
+```
+
+```{r}
+t_rel <- datos_na %>% 
+  group_by(Relacion) %>% 
+  summarise(N = n())
+
+t_rel <- t_rel %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(N))
+
+t_ed <- datos_na %>% 
+  group_by(Nivel_ed) %>% 
+  summarise(N = n())
+
+t_ed <- t_ed %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(N))
+
+t_cat <- datos_na %>% 
+  group_by(Categoria_ocup) %>% 
+  summarise(N = n())
+
+t_cat <- t_cat %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(N))
+
+t_inten <- datos_na %>% 
+  group_by(Intensidad) %>% 
+  summarise(N = n())
+
+t_inten <- t_inten %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(N))
+
+t_estad <- datos_na %>% 
+  group_by(Estado) %>% 
+  summarise(N = n())
+
+t_estad <- t_estad %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(N))
+
+t_sexo <- datos_na %>% 
+  group_by(Sexo) %>% 
+  summarise(N = n())
+
+t_sexo <- t_sexo %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(N))
+
+
+flextable((t_rel), 
+  col_keys = names(t_rel)) %>% 
+  add_header_lines(.,values = c("Cuadro 3. Relación con el Jefe/a del hogar")) %>%
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") 
+
+
+flextable((t_ed), 
+  col_keys = names(t_ed)) %>%  
+  add_header_lines(.,values = c("Cuadro 4. Nivel educativo") )%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit")
+
+
+flextable((t_cat), 
+  col_keys = names(t_cat)) %>% 
+  add_header_lines(.,values = c("Cuadro 5. Categoría ocupacional")) %>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""))
+  
+
+
+flextable((t_inten), 
+  col_keys = names(t_inten)) %>% 
+  add_header_lines(.,values = c("Cuadro 6. Intensidad de la ocupación"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit")
+
+
+flextable((t_sexo), 
+  col_keys = names(t_sexo)) %>% 
+  add_header_lines(.,values = c("Cuadro 7. Sexo"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit")
+  
+
+```
+
+
+## Resúmen numérico para las variables cuantitativas 
+```{r}
+datos_conti_f <- datos %>% 
+  filter(Ingreso!=-9, Total_horas!=999) %>%  
+  dplyr::select(Total_horas, Ingreso, Edad)
+ 
+datos_conti_r <- skim(datos_conti_f) %>% 
+  rename(Variable = skim_variable) %>% 
+  dplyr::select(-complete_rate, -n_missing, -numeric.hist, -skim_type) %>% 
+  mutate(across(where(is.numeric),round, 2)) %>% 
+  rename(Media = numeric.mean, 
+         Desvío_std=numeric.sd, 
+         Mín=numeric.p0,
+         Q1=numeric.p25,
+         Mediana=numeric.p50,
+         Q3=numeric.p75,
+         Máx=numeric.p100)  
+
+
+datos_conti_b <- datos_conti_f %>% 
+  pivot_longer(cols = c(names(datos_conti_f))) %>% 
+  group_by(name) %>% 
+  summarise(media = mean(value),
+            desvio = sd(value),
+            mediana = median(value), 
+            CV = round(desvio/media*100,2),
+            Asimetría = round(3*(media-mediana)/desvio,2)) %>% 
+  dplyr::select(-media, -desvio, -mediana)
+  
+
+datos_conti_r <- left_join(datos_conti_r, datos_conti_b, by = c("Variable" = "name")) 
+
+flextable((datos_conti_r), 
+  col_keys = c("Variable", "Media", "Desvío_std", "Mín", "Q1", "Mediana", "Q3", "Máx", "CV", "Asimetría")) %>% 
+  add_header_lines(.,values = c("Cuadro 8. Medidas descriptivas: tendencia central, dispersión y asimetría")) %>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(Media = function(x) format(round(x, 3), big.mark = ""),
+               Desvío_std= function(x) format(round(x, 3), big.mark = ""), 
+               Q1= function(x) format(round(x, 3), big.mark = ""), 
+               Mediana = function(x) format(round(x, 3), big.mark =""),
+               Q3=function(x) format(round(x,3), big.mark=""),
+               Máx=function(x) format(round(x,3), big.mark=""))
+              
+```
+
+## Distribución de frecuencias
+```{r, fig.width=7, fig.height=6}
+options(scipen = 99)
+datos_conti_f %>% 
+  pivot_longer(cols = c(names(datos_conti_f))) %>% 
+  
+ggplot()+ 
+  geom_histogram(aes(x = value, fill = name), bins=25, color = "white", show.legend = F)+
+  facet_wrap(~name, scales='free', ncol =3) + 
+  scale_x_continuous(labels = scales::number_format(big.mark = ".",decimal.mark = ","))+
+  scale_fill_manual(values = c("#FF0066", "#00FF00", "#009999")) +
+  labs(x = " ",
+       y = " ",
+       title = "Gráfico 1. Distribuciones de frecuencias ",
+       caption = "Fuente: EPH 2º Trimestre 2020.") + theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        plot.caption = element_text(size=8, face = "bold"))
+
+ggsave("graficos/histogramas.png")
+```
+
+## Boxplots
+```{r, fig.width=7, fig.height=6}
+a <- ggplot(data = datos, aes(x=Edad, y=Edad)) +  
+  geom_boxplot(fill = "#FF0066", alpha =0.4) + 
+  labs (x = " ", 
+        y = "Edad") + coord_flip() + theme_minimal()
+
+b <- ggplot(data = filter(datos, Ingreso>=0), aes(Ingreso, y = Ingreso)) + 
+  geom_boxplot(fill = "#00FF00", alpha=0.4) +  
+  labs (x = " ",
+    y = "Ingreso ($)")+ coord_flip() + theme_minimal()
+
+c <- ggplot(data = filter(datos, Total_horas != 999), aes(x=Total_horas, y=Total_horas)) +  
+  geom_boxplot(fill = "#009999", alpha = 0.4) + 
+  labs (x = " ", 
+        y = "Horas trabajadas") + coord_flip() + 
+  theme_minimal()
+
+boxplots <- grid.arrange(a,b,c, ncol=1, nrow=3, widths = c(8), heights = c(5, 5,5),
+     top = textGrob("Gráfico 2. Diagramas de caja y bigotes",
+     gp=gpar(fontsize=14, fontface = "bold"),
+     hjust=0.9),
+     bottom = textGrob(
+    "Fuente: EPH 2º Trimestre 2020",
+    gp = gpar(fontface = "bold", fontsize = 8),
+    hjust = 1,
+    x = 1))
+
+ggsave("graficos/boxplots.jpg", boxplots)
+```
+
+```{r}
+CNO <- datos %>% 
+  filter(Total_horas != 999) %>% 
+  arrange(desc(Total_horas)) %>% 
+  dplyr::select(Categoria, Total_horas) %>% 
+  head(n=10)
+
+flextable(CNO, 
+  cwidth=2, cheight = 1) %>% 
+  add_header_lines(.,values = c("Cuadro 9. Categoría ocupacional de las 10 personas que más trabajaron en la semana anterior")) %>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit")
+
+```
+
+## Diagramas de dispersión
+```{r, fig.height= 9 , fig.width= 7}
+
+g1 <- ggplot(data = filter(datos_conti_f, Ingreso !=0), aes(x= Total_horas, y=Ingreso)) +
+  geom_point(alpha = 0.3, colour = "blue", show.legend = F) + 
+  labs(x = "Horas trabajadas",
+       y = "Log(Ingreso)")+ scale_y_log10() + theme_minimal()   
+
+g2 <- ggplot(data = filter(datos_conti_f, Ingreso !=0), aes(x= Edad, y=Ingreso)) +
+  geom_point(alpha = 0.3, colour = "red", show.legend = F) +  
+  labs(x = "Edad",
+       y = "Log(Ingreso)")+ scale_y_log10() + theme_minimal()   
+
+g3 <- ggplot(datos_conti_f, aes(x= Edad, y=Total_horas)) +
+  geom_point(alpha = 0.3, colour = "green", show.legend = F) +  
+  labs(x = "Edad",
+       y = "Horas trabajadas")+theme_minimal()
+
+g <- grid.arrange(g1,g2,g3, ncol=1, nrow=3,
+     top = textGrob("Gráfico 3. Diagramas de dispersión.",
+     gp=gpar(fontsize=14, fontface = "bold"),
+     hjust = 1.3),
+     bottom = textGrob(
+    "Fuente: EPH 2º Trimestre 2020",
+    gp = gpar(fontface="bold", fontsize = 8),
+    hjust = 1,
+    x = 1))
+
+ggsave("graficos/dispersion.jpg", g)
+```
+
+## Matríz de Correlación
+```{r}
+# datos_conti_f <- datos_conti_f %>% 
+#   mutate(log_ingreso = log(Ingreso))
+
+m <- plot_correlation(datos_conti_f, title = "Matríz de Correlación",
+                   theme_config = list(legend.position = "bottom", axis.text.x = NULL))
+
+ggsave("graficos/matriz.jpg", m)
+```
+
+## Test de Correlación
+```{r}
+cor_1 <- cor.test(datos_conti_f$Ingreso, datos_conti_f$Total_horas)
+estimate_1 <- round(cor_1$estimate,2)
+p_value_1 <- cor_1$p.value
+int_1 <- round(cor_1$conf.int,2)
+
+cor_2 <- cor.test(datos_conti_f$Ingreso, datos_conti_f$Edad)
+estimate_2 <- round(cor_2$estimate,2)
+p_value_2 <- cor_2$p.value
+int_2 <- round(cor_2$conf.int,2)
+
+cor_3 <- cor.test(datos_conti_f$Total_horas, datos_conti_f$Edad)
+estimate_3 <- round(cor_3$estimate,2)
+p_value_3 <- cor_3$p.value
+int_3 <- round(cor_3$conf.int,2)
+
+
+tabla_corr <- data.frame(matrix(ncol = 4, nrow = 3))
+rownames(tabla_corr)=c("Ingreso - Total_horas","Ingreso - Edad","Edad - Total_horas")
+colnames(tabla_corr)=c("Estimado", "Valor_p", "Lim. inferior", "Lim.superior")
+
+tabla_corr <- cbind(Variables = rownames(tabla_corr), tabla_corr)
+rownames(tabla_corr) <- NULL
+
+
+tabla_corr[1,2]=estimate_1
+tabla_corr[2,2]=estimate_2
+tabla_corr[3,2]=estimate_3
+tabla_corr[1,3]=p_value_1
+tabla_corr[2,3]=p_value_2
+tabla_corr[3,3]=p_value_3
+tabla_corr[1,4]=int_1[1]
+tabla_corr[2,4]=int_2[1]
+tabla_corr[3,4]=int_3[1]
+tabla_corr[1,5]=int_1[2]
+tabla_corr[2,5]=int_2[2]
+tabla_corr[3,5]=int_3[2]
+
+
+flextable((tabla_corr),
+  col_keys = names(tabla_corr)) %>% 
+  add_header_lines(.,values = c("Cuadro 10. Test de correlaciones")) %>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(Valor_p = function(x) format(round(x, 9), big.mark = ""))
+```
+
+## Variance Inflation Factors
+```{r}
+#Regresión entre Total_horas ~ Edad
+r_cuadrado <- round(summary(lm(Total_horas ~  Edad, data = datos_conti_f))$r.squared,6)
+
+VIF <- 1/(1-r_cuadrado)
+
+tabla_vif <- data.frame(matrix(ncol = 1, nrow = 2))
+rownames(tabla_vif)=c("Total_horas","Edad")
+colnames(tabla_vif)=c("VIF")
+
+tabla_vif <- cbind(Variables = rownames(tabla_vif), tabla_vif)
+rownames(tabla_vif) <- NULL
+
+
+tabla_vif[1,2]=round(VIF,4)
+tabla_vif[2,2]=round(VIF,4)
+
+
+flextable((tabla_vif),
+  col_keys = names(tabla_vif)) %>% 
+  add_header_lines(.,values = c("Cuadro 11. Variance Inflation Factors")) %>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") 
+```
+Los valores de VIF obtenidos en el Cuadro 5, sumado a la Matríz y Test de Correlación estimados, indicarían que no habría problemas de colinealidad y multicolinealidad en el dataset.
+
+
+## Análisis de las variables categóricas
+## Recodificación
+
+Se decidió recodificar ciertas variables del dataset para una mejor visualización y modelización de los datos
+```{r}
+#Niveles de la variable nivel educativo
+table(datos$Nivel_ed)
+
+#Recodificamos la variable de nivel educativo
+datos<- datos %>% 
+  mutate(Nivel_ed = case_when(Nivel_ed %in% c("Primaria incompleta (incluye educacion especial)", "Sin instruccion") ~ "Sin instrucción",
+                              Nivel_ed %in% c("Primaria completa", "Secundaria incompleta") ~ "Primaria",
+                              Nivel_ed %in% c("Secundaria completa","Superior universitaria incompleta") ~ "Secundaria",
+                              Nivel_ed %in% c("Superior universitaria completa") ~ "Superior"))
+
+datos$Nivel_ed <- as.factor(datos$Nivel_ed)
+datos$Nivel_ed <- factor(datos$Nivel_ed, levels = c("Sin instrucción","Primaria","Secundaria","Superior"))
+
+#Recodificamos la variable Estado, Intensidad, Relación y Tipo
+datos<- datos %>% 
+  mutate(Estado = case_when(Estado == "casado?" ~ "Casado",
+                            Estado == "soltero/a?" ~ "soltero/a",
+                            Estado == "unido?" ~ "unido",
+                            Estado == "viudo/a?" ~ "viudo/a",
+                            Estado == "separado/a o divorsiado/a?" ~ "separado/a"),
+         Intensidad = case_when(Intensidad == "Ocupado que no trabajo en la semana" ~ "No_trabajo",
+                                Intensidad == "Subocupado por insuficiencia horaria" ~ "Subocupado",
+                                TRUE ~ Intensidad),
+
+         Relacion = case_when(Relacion == "Conyuge / Pareja" ~ "Conyuge",
+                              Relacion == "Hijo/a Hijastro/a" ~ "Hijo/a",
+                              Relacion == "Nietro/a" ~ "Nieto/a",
+                              Relacion %in% c("Otros Familiares", "Suegro/a", "Yerno/Nuera") ~ "Otros",
+                              Relacion == "No familiares" ~ "No_fliar",
+                              TRUE ~ Relacion),
+         Tipo =  case_when(Tipo == "...privada" ~ "Privado",
+                           Tipo == "...estatal" ~ "Estatal",
+                           Tipo == "...de otro tipo" ~ "Otro",
+                           TRUE ~ Tipo))
+```
+
+## Gráfico múltiple de distribución del ingreso y frecuencias: Sexo y Nivel educativo
+
+```{r, fig.width=9.8, fig.height=7, warning=FALSE, message=FALSE}
+
+datos_f <- datos %>% 
+  filter(Ingreso >=0, Total_horas!=999)
+
+g4_1 <- ggplot(data = datos_f) + geom_density(aes(x= Ingreso, fill = Sexo, alpha = 0.3)) + 
+  scale_x_log10()+
+  labs (x = "Log(Ingreso)",
+    y = " ") + guides(alpha = F) + theme_minimal() + theme(axis.title.x = element_text(size = 9))
+
+g4 <- ggplot(data = datos_f,aes(x=reorder(Sexo,Ingreso, FUN = median), y=Ingreso, fill = Sexo)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() + 
+  labs (x = "Sexo",
+    y = "Log(Ingreso)") + theme_minimal() + theme(axis.title.x = element_text(size = 9),
+                                                  axis.title.y = element_text(size = 9))
+
+g5_1 <- ggplot(data = datos_f) + geom_density(aes(x= Ingreso, fill = Nivel_ed), alpha = 0.3) + 
+  scale_x_log10() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Log(Ingreso)",
+        fill = "Nivel educativo",
+    y = " ") + guides(alpha = F) + theme_minimal() + theme(axis.title.x = element_text(size = 9))
+
+
+g5 <- ggplot(data = datos_f, aes(x=reorder(Nivel_ed,Ingreso, FUN = median), y=Ingreso, fill = Nivel_ed)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Nivel educativo",
+    y = "Log(Ingreso)")+
+    theme_minimal() +  theme(axis.title.x = element_text(size = 9),
+                             axis.title.y = element_text(size = 9))
+
+gm <- grid.arrange(g4_1,g4,g5_1,g5, ncol=2, nrow=2, widths = c(11, 11), heights = c(9, 9),
+                   top = textGrob("Gráfico 4. Distribución del ingreso de la ocupación principal según el Sexo y Nivel Educativo.",
+     gp=gpar(fontsize=13, fontface = "bold"),
+     hjust = 0.6),
+    bottom = textGrob(
+    "Fuente: EPH 2º Trimestre 2020",
+    gp = gpar(fontface = "bold", fontsize = 8),
+    hjust = 1,
+    x = 1))
+
+ggsave("graficos/g_multiple1.jpg", gm)
+
+
+```
+
+
+## Gráfico múltiple de distribución del ingreso y frecuencias: Calificación y Estado
+```{r, fig.width=9.8, fig.height=7, warning=FALSE, message=FALSE }
+
+g6_1 <- ggplot(data = filter(datos_f, Calificacion %in% c("No calificados", "Operativos", "Profesionales", "Técnicos"))) + geom_density(aes(x= Ingreso, fill = Calificacion, alpha =0.25)) + scale_x_log10() + scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Log(Ingreso)",
+         fill = "Calificación",
+    y = " ") +
+    theme_minimal() +  guides(alpha = F) + theme(axis.title.x = element_text(size = 9))
+
+
+g6 <- ggplot(data = filter(datos_f, Calificacion %in% c("No calificados", "Operativos", "Profesionales", "Técnicos"), ), aes(x=reorder(Calificacion,Ingreso, FUN = median), y=Ingreso, fill = Calificacion)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Calificación",
+        y = "Log(Ingreso)")+
+    theme_minimal() +  theme(axis.title.x = element_text(size = 9),
+                             axis.title.y = element_text(size = 9))
+
+
+g7_1 <- ggplot(data = datos_f) + geom_density(aes(x= Ingreso, fill = Estado,alpha = 0.25)) + scale_x_log10() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Log(Ingreso)",
+    y = " ") +
+    theme_minimal() +  guides (alpha = F) +theme(axis.title.x = element_text(size = 9))
+
+
+
+g7 <- ggplot(data = datos_f, aes(x=reorder(Estado,Ingreso, FUN = median), y=Ingreso, fill = Estado)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Estado",
+    y = "Log(Ingreso)") +
+    theme_minimal() +  theme(axis.title.x = element_text(size = 9),
+                             axis.title.y = element_text(size = 9))
+
+
+
+gm_2 <- grid.arrange(g6_1,g6,g7_1,g7, ncol=2, nrow=2, widths = c(9, 9), heights = c(7, 7),
+                     top = textGrob("Gráfico 5. Distribución del ingreso de la ocupación principal según la Calificación y Estado Conyugal.",
+     gp=gpar(fontsize=13, fontface = "bold"),
+     hjust = 0.5),
+    bottom = textGrob(
+    "Fuente: EPH 2º Trimestre 2020",
+    gp = gpar(fontface = "bold", fontsize = 8),
+    hjust = 1,
+    x = 1))
+
+ggsave("graficos/g_multiple2.jpg", gm_2)
+```
+
+## Gráfico múltiple de distribución del ingreso y frecuencias: Categoría ocupacional e Intensidad
+```{r, fig.width=9.8, fig.height=7, warning=FALSE, message=FALSE}
+g8_1 <- ggplot(data = filter(datos_f, Categoria_ocup %in% c("Cuenta propia", "Obrero o empleado", "Patron"))) + 
+geom_density(aes(x= Ingreso, fill = Categoria_ocup, alpha = 0.25)) + scale_x_log10() + scale_fill_brewer(type = "qual", palette = "Dark2") + labs (x = "Log(Ingreso)", fill = "Categoría ocupacional",
+    y = " ") +
+    theme_minimal() + guides(alpha = F) + theme(axis.title.x = element_text(size = 9))
+
+
+g8 <-  ggplot(data = filter(datos_f, Categoria_ocup %in% c("Cuenta propia", "Obrero o empleado", "Patron")), aes(x=reorder(Categoria_ocup,Ingreso, FUN = median), y=Ingreso, fill = Categoria_ocup)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() +
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Categoría Ocupacional",
+    y = "Log(Ingreso)")+
+    theme_minimal() +  theme(axis.title.y = element_text(size = 9),
+                             axis.title.x = element_text(size = 9))
+
+g9_1 <- ggplot(data = datos_f) + 
+geom_density(aes(x= Ingreso, fill = Intensidad, alpha = 0.25)) + scale_x_log10() + scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Log(Ingreso)",
+    y = " ")+
+    theme_minimal() + guides(alpha=F)+ theme(axis.title.x = element_text(size = 9))
+
+g9 <-  ggplot(data = datos_f, aes(x=reorder(Intensidad,Ingreso, FUN=median), y=Ingreso, fill = Intensidad)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Intensidad",
+    y = " ")+
+    theme_minimal() +  theme(axis.title.y = element_text(size = 9),
+                             axis.title.x = element_text(size = 9))
+
+gm_3 <- grid.arrange(g8_1,g8,g9_1,g9, ncol=2, nrow=2, widths = c(9, 9), heights = c(7, 7),
+                     top = textGrob("Gráfico 6. Distribución del ingreso de la ocupación principal según la Categoría ocupacional y la Intensidad.",
+     gp=gpar(fontsize=13, fontface = "bold"),
+     hjust = 0.5),
+                   bottom = textGrob(
+    "Fuente: EPH 2 Trimestre 2020",
+    gp = gpar(fontface = "bold", fontsize = 8),
+    hjust = 1,
+    x = 1))
+
+ggsave("graficos/g_multiple3.jpg", gm_3)
+```
+
+## Gráfico múltiple de distribución del ingreso: Relación con el Jefe/a del hogar y Tipo de establecimiento
+```{r, fig.width= 9.8, fig.height=7, warning=FALSE, message=FALSE}
+
+g10_1 <- ggplot(data = datos_f) + 
+geom_density(aes(x= Ingreso, fill = Relacion, alpha = 0.25)) + scale_x_log10() + scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Log(Ingreso)", 
+        fill = "Relación de parentesco",
+    y = " ") +
+    theme_minimal() +  guides (alpha = F) + theme(axis.title.x = element_text(size = 9),
+        axis.text.x = element_text(size =7))
+
+
+g10 <-  ggplot(data = datos_f, aes(x=reorder(Relacion, Ingreso, FUN = median), y=Ingreso, fill = Relacion)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() +
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Relación con Jefe/a de hogar",
+    y = "Log(Ingreso)") + 
+    theme_minimal() +  theme(axis.title.x = element_text(size = 9),
+        axis.text.x = element_text(size =7))
+
+
+g11_1 <- ggplot(data = filter(datos_f, Tipo %in% c("Privado", "Estatal", "Otro"))) + 
+geom_density(aes(x= Ingreso, fill = Tipo, alpha = 0.25)) + scale_x_log10() + scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Log(Ingreso)",
+    y = " ",
+    fill = "Tipo de establecimiento") +
+    theme_minimal() +  guides (alpha = F) + theme(axis.title.x = element_text(size = 9))
+
+
+
+g11 <-  ggplot(data = filter(datos_f, Tipo %in% c("Privado", "Estatal", "Otro")), aes(x=reorder(Tipo,Ingreso, FUN =median), y=Ingreso, fill = Tipo)) + 
+  geom_boxplot(show.legend = F, alpha = 0.4) + scale_y_log10() + coord_flip() + 
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs (x = "Tipo de establecimiento",
+    y = "Log(Ingreso)") + 
+    theme_minimal() +  theme(axis.title.x = element_text(size = 9))
+
+
+gm_4 <- grid.arrange(g10_1,g10,g11_1,g11, ncol=2, nrow=2, widths = c(9, 9), heights = c(7, 7),
+                     top = textGrob("Gráfico 7. Distribución del ingreso de la ocupación principal según Relación 
+con el Jefe/a del hogar y Tipo de establecimiento.",
+     gp=gpar(fontsize=13, fontface ="bold"),
+     hjust = 0.5),
+                   bottom = textGrob(
+    "Fuente: EPH 2 Trimestre 2020",
+    gp = gpar(fontface = "bold", fontsize = 8),
+    hjust = 1,
+    x = 1))
+
+ggsave("graficos/g_multiple4.jpg", gm_4)
+
+
+```
+
+## Análisis de la tendencia central, dispersión y asimetría del ingreso de la ocupación principal en función de las variables categóricas
+```{r}
+tabla_sexo <- datos_f %>% 
+  group_by(Sexo) %>% 
+  summarise(N = n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_sexo <- tabla_sexo %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Sexo, N, Freq, everything())
+
+
+flextable((tabla_sexo), 
+  col_keys = names(tabla_sexo)) %>% 
+  add_header_lines(.,values = c("Cuadro 6. Distribución del ingreso de la ocupación principal según Sexo"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x, 2), big.mark = ""), 
+               Mediana= function(x) format(round(x, 2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x, 2), big.mark =""))
+
+
+
+```
+```{r}
+tabla_nivel_Ed <- datos_f %>% 
+  group_by(Nivel_ed) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_nivel_Ed <- tabla_nivel_Ed %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Nivel_ed, N, Freq, everything())
+
+
+flextable((tabla_nivel_Ed), 
+  col_keys = names(tabla_nivel_Ed)) %>% 
+  add_header_lines(.,values = c("Cuadro 7. Distribución del ingreso de la ocupación principal según Nivel Educativo"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x, 2), big.mark = ""), 
+               Mediana= function(x) format(round(x, 2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x, 2), big.mark =""))
+
+```
+```{r}
+tabla_calif <- datos_f %>% 
+  filter(Calificacion %in% c("No calificados", "Operativos", "Profesionales", "Técnicos")) %>% 
+  group_by(Calificacion) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_calif <- tabla_calif %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Calificacion, N, Freq, everything())
+
+
+flextable((tabla_calif), 
+  col_keys = names(tabla_calif)) %>% 
+  add_header_lines(.,values = c("Cuadro 8. Distribución del ingreso de la ocupación principal según la calificación del puesto de trabajo"))%>%
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x, 2), big.mark = ""), 
+               Mediana= function(x) format(round(x, 2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x, 2), big.mark =""))
+
+#la suma de Freq no da exactamente 1 por cuestión de redondeo
+```
+
+```{r}
+tabla_estado <- datos_f %>% 
+  group_by(Estado) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_estado <- tabla_estado %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Estado, N, Freq, everything())
+
+
+flextable((tabla_estado), 
+  col_keys = names(tabla_estado)) %>% 
+  add_header_lines(.,values = c("Cuadro 9. Distribución del ingreso de la ocupación principal según el Estado Conyugal"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x, 2), big.mark = ""), 
+               Mediana= function(x) format(round(x, 2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x, 2), big.mark =""))
+```
+
+```{r}
+tabla_cat_ocup <- datos_f %>% 
+  filter(Categoria_ocup %in% c("Cuenta propia", "Obrero o empleado", "Patron")) %>% 
+  group_by(Categoria_ocup) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_cat_ocup <- tabla_cat_ocup %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  dplyr::select(Categoria_ocup, N, Freq, everything())
+
+
+flextable((tabla_cat_ocup), 
+  col_keys = names(tabla_cat_ocup)) %>% 
+  add_header_lines(.,values = c("Cuadro 10. Distribución del ingreso de la ocupación principal según la Categoría ocupacional"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x,2), big.mark = ""), 
+               Mediana= function(x) format(round(x,2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x,2), big.mark =""))
+```
+
+```{r}
+tabla_intensidad <- datos_f %>% 
+  group_by(Intensidad) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_intensidad <- tabla_intensidad %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Intensidad, N, Freq, everything())
+
+
+flextable((tabla_intensidad), 
+  col_keys = names(tabla_intensidad)) %>% 
+  add_header_lines(.,values = c("Cuadro 11. Distribución del ingreso de la ocupación principal según la Intensidad de la ocupación"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x,2), big.mark = ""), 
+               Mediana= function(x) format(round(x,2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x,2), big.mark =""))
+```
+```{r}
+tabla_relacion <- datos_f %>% 
+  group_by(Relacion) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_relacion <- tabla_relacion %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Relacion, N, Freq, everything())
+
+
+flextable((tabla_relacion), 
+  col_keys = names(tabla_relacion)) %>% 
+  add_header_lines(.,values = c("Cuadro 12. Distribución del ingreso de la ocupación principal según la Relación con el Jefe/a del hogar"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x,2), big.mark = ""), 
+               Mediana= function(x) format(round(x,2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x,2), big.mark =""))
+```
+```{r}
+tabla_tipo <- datos_f %>% 
+  group_by(Tipo) %>% 
+  summarise(N= n(),
+            Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_tipo <- tabla_tipo %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Tipo, N, Freq, everything())
+
+
+flextable((tabla_tipo), 
+  col_keys = names(tabla_tipo)) %>% 
+  add_header_lines(.,values = c("Cuadro 13. Distribución del ingreso de la ocupación principal según el Tipo de establecimiento"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x,2), big.mark = ""), 
+               Mediana= function(x) format(round(x,2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x,2), big.mark =""))
+```
+
+
+## Análisis de la variable Categoría
+```{r}
+list_cno <- datos %>%
+  dplyr::select(Categoria) %>% 
+  unique()
+
+#Creación de variable de grandes grupos de caracter de ocupación según CNO 
+#https://www.indec.gob.ar/ftp/cuadros/menusuperior/clasificadores/definiciones_conceptuales_cno.pdf
+
+datos <- datos %>% 
+  mutate(Categoria_agrup = case_when(Categoria %in% c("Funcionarios del poder ejecutivo nacional, provincial, municipal y/o departamental", 
+  "Funcionarios del poder legislativo nacional, provincial, municipal y/o departamental",
+  "Funcionarios del poder judicial, federal, nacional, provincial, municipal y/o departamental", 
+  "Directivos de pequeñas y microempresas", "Directivos de medianas empresas privadas productoras de bienes y servicios", "Directivos de grandes empresas privadas productoras de bienes y servicios",
+  "Directivos de instituciones sociales", 
+  "Directivos de organismos, empresas e instituciones estatales") ~ "ocupaciones de dirección", 
+
+Categoria %in% c("Ocupaciones de la gestión administrativa, planificación y control de gestión", "Ocupaciones de la gestión jurídico-legal") ~ "ocupaciones de gestión administrativa, de planificación, control de gestión y jurídico-legal", 
+
+Categoria %in% c("Ocupaciones de la gestión presupuestaria, contable y financiera") ~ "ocupaciones de gestión presupuestaria, contable y financiera", 
+
+Categoria %in% c("Ocupaciones de la comercialización directa", "Ocupaciones de la comercialización indirecta", "Ocupaciones del almacenaje de insumos, materias primas, mercaderías e instrumentos" , "Ocupaciones del transporte", "Ocupaciones del corretaje comercial, venta domiciliaria, viajantes y promotores", "Ocupaciones de la comercialización ambulante y callejera", "Ocupaciones de las telecomunicaciones") ~ "ocupaciones de comercialización,transporte,
+telecomunicaciones y almacenaje", 
+
+Categoria %in% c("Ocupaciones de la salud y sanidad", "Ocupaciones de la educación", "Ocupaciones de la investigación", "Ocupaciones de la asesoria y la consultaría", "Ocupaciones de la prevención de siniestros (naturales, humanos, productivos) atención del medio ambiente y ecología", "Ocupaciones de la comunicación de masas", "Ocupaciones de los servicios de vigilancia y seguridad civil", "Ocupaciones de servicios policiales", "Ocupaciones de las FFAA Gendarmería y Prefectura",  "Ocupaciones de los servicios sociales, comunales, políticos, gremiales y religiosos") ~ "ocupaciones servicios sociales básicos", 
+
+Categoria %in% c("Ocupaciones del arte", "Ocupaciones del deporte", "Ocupaciones de servicios de recreación", "Ocupaciones de servicios gastronómicos", "Ocupaciones de los servicios domésticos", "Ocupaciones de los servicios de alojamiento y turismo", "Ocupaciones de servicios de limpieza no domésticos", "Ocupaciones del cuidado y la atención de personas", "Ocupaciones de los servicios sociales varios") ~ "ocupaciones de servicios varios", 
+
+Categoria %in% c("Ocupaciones de la producción pesquera", "Ocupaciones de la producción ganadera", "Ocupaciones de la producción forestal", "Ocupaciones de la producción agrícola") ~ "ocupaciones agropecuarias, forestales, de la pesca y de la caza",  
+
+Categoria %in% c("Ocupaciones de la producción extractiva", "Ocupaciones de la producción de energía, agua y gas", "Ocupaciones de la construcción edilicia, de obras de infraestructura y de redes de distribución de energía, agua potable, gas, telefonía y petróleo") ~ "ocupaciones de la producción extractiva, energética, de construcción e infraestructura", 
+
+Categoria %in% c("Ocupaciones de la producción industrial y artesanal", "Ocupaciones de la producción de software", "Ocupaciones de la reparación de bienes de consumo") ~ " ocupaciones de la producción artesanal, industrial y de reparación de bienes de consumo",
+
+Categoria %in% c("Ocupaciones de la instalación y mantenimiento de maquinaria, equipos y sistemas de la producción de bienes", "Ocupaciones del desarrollo tecnológico productivo", "Ocupaciones de la instalación y mantenimiento de maquinaria, equipos y sistemas") ~ "ocupaciones auxiliares de la producción de bienes y la prestación de servicios",
+TRUE ~ "Ns.Nc"))
+```
+
+
+```{r}
+#Chequeo de la variable creada
+
+table(datos$Categoria_agrup)
+#Los casos Ns.Nc son los mismos que no reportaron en la variable Categoría. Lo chequeamos abajo.
+
+datos %>% 
+  filter(Categoria_agrup == "Ns.Nc") %>% 
+  dplyr::select(Categoria, Categoria_agrup)
+
+```
+
+```{r}
+tabla_categoria <- datos %>% 
+   filter(Ingreso!=-9, Total_horas!=999, Categoria_agrup != "Ns.Nc") %>% 
+  group_by(Categoria_agrup) %>%
+  summarise(N = n(),
+    Media = mean(Ingreso),
+            Mediana = median(Ingreso),
+            Desvío_std = sd(Ingreso),
+            CV = round(Desvío_std/Media*100,2),
+            Asimetría = round(3*(Media-Mediana)/Desvío_std,2))
+
+tabla_categoria <- tabla_categoria %>% 
+  mutate(Freq = paste(round(N/sum(N)*100,2),"%")) %>% 
+  arrange(desc(Media)) %>% 
+  dplyr::select(Categoria_agrup, N, Freq, everything())
+
+
+flextable((tabla_categoria), 
+  col_keys = names(tabla_categoria)) %>% 
+  add_header_lines(.,values = c("Cuadro 20. Distribución del ingreso de la ocupación principal según el caracter ocupacional"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>%
+  set_table_properties(., layout = "autofit") %>% 
+  set_formatter(N = function(x) format(round(x, ), big.mark = ""),
+               Media= function(x) format(round(x, 2), big.mark = ""), 
+               Mediana= function(x) format(round(x, 2), big.mark = ""), 
+               Desvío_std = function(x) format(round(x, 2), big.mark =""))
+```
+
+```{r}
+# Removemos los objetos en el workspace que ya no se usan.
+x<- which(ls()=="datos"|ls()=="datos_f")
+ls1<- ls()[-x]
+rm(list = ls1)
+```
+
+# Modelización
+```{r}
+datos <- datos %>%
+  filter(Ingreso != 0) %>% 
+  dplyr::select(-Codusu, -Nro_hogar, -Categoria)
+
+
+# Se probó incluyendo la Edad^2 y el ajuste de los modelos fue muy similar. Por tal, se decidió no incluir la variable.
+```
+
+## División de los datos en training y testing
+```{r}
+set.seed(1234) #semilla para garantizar reproducibilidad
+
+inTraining <- createDataPartition(datos$Ingreso, p = .70, list = FALSE) # 70% training y 30% testing
+
+training <- datos[inTraining,] # genero el training set
+testing  <- datos[-inTraining,] # genero el testing set
+
+dim(training)
+dim(testing)
+
+# Genera los índices que indican que observaciones son separadas en cada fold.
+fold_index <- createFolds(training$Ingreso,
+                          k = 10, 
+                          list = T, 
+                          returnTrain = T)
+
+# Diseño de remuestreo con cross validation
+ctrl <- trainControl(method="repeatedcv",
+                     index = fold_index,
+                     number = 10, 
+                     repeats = 3)
+
+```
+
+Se particiona el dataset en 70% para training y 30% para testing. Luego, se utiliza un diseño de remuestro a través de cross-validation utilizando 10 folds (K) repitiendo las estimaciones 3 veces en el set de training.
+
+## Preprocesado de los datos
+
+### Imputación de valores faltantes
+```{r}
+## Imputación de valores faltantes
+
+#Reemplazamos los -9 en NA en la variable Ingreso. El únio 999 en la variable Total_horas se eliminó al no considerar los casos de Ingreso = 0.
+
+training <- training %>% 
+  replace_with_na(replace = list (Ingreso = -9)) 
+
+#Chequemos la recodifación
+summary(training$Ingreso)
+
+#Para los NA en Ingreso se los imputa por la mediana de la variable. Dada la asimetría que posee para evitar el efecto de los valores más extremos. 
+training <- training %>% 
+  mutate(Ingreso =  case_when(is.na(Ingreso) ~ median(Ingreso, na.rm = T),
+                              TRUE ~ Ingreso))
+
+
+summary(training$Ingreso)
+
+# Para set de testing
+testing <- testing %>% 
+  replace_with_na(replace = list (Ingreso = -9))
+
+#Chequemos la recodifación
+summary(testing$Ingreso)
+
+testing <- testing %>% 
+  mutate(Ingreso =  case_when(is.na(Ingreso) ~ median(Ingreso, na.rm = T),
+                              TRUE ~ Ingreso))
+
+summary(testing$Ingreso)
+
+```
+
+```{r}
+#Se convierte a factor las variables categóricas
+col_names_selec <- c(1:3,5:8,10,12)
+training[,col_names_selec] <- lapply(training[,col_names_selec] , factor)
+
+col_names_selec <- c(1:3,5:8,10,12)
+testing[,col_names_selec] <- lapply(testing[,col_names_selec] , factor)
+```
+
+
+```{r}
+#Aplicamos Log10 a Ingreso
+training <- training %>% 
+  mutate(log_ingreso =log10(Ingreso)) %>% 
+  dplyr::select(-Ingreso)
+
+testing <- testing %>% 
+  mutate(log_ingreso = log10(Ingreso))%>% 
+  dplyr::select(-Ingreso)
+```
+
+### Variables con varianza próxima a cero
+```{r}
+nearzerovar <- datos %>% 
+  nearZeroVar(saveMetrics = TRUE) %>% 
+  mutate(freqRatio = round(freqRatio,3),
+         percentUnique = round(percentUnique,3))
+
+flextable((nearzerovar), 
+  col_keys = names(nearzerovar)) %>% 
+  add_header_lines(.,values = c("Cuadro 21. Análisis de la varianza"))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit")
+
+#No se detectan predictores con varianza próxima a 0 o 0.
+```
+
+```{r}
+#Se crea un objeto recipe() con la variable respuesta y los predictores.
+objeto_recipe <- recipe(formula = log_ingreso ~ ., data = training)
+objeto_recipe
+```
+
+### Estandarización de las variables numéricas
+```{r}
+objeto_recipe <- objeto_recipe %>%
+  step_center(Total_horas, Edad)
+
+objeto_recipe <- objeto_recipe %>%
+  step_scale(Total_horas, Edad) 
+```
+
+### Binarización de las variables categóricas (One hot Encoding)
+```{r}
+objeto_recipe <- objeto_recipe %>%
+  step_dummy(all_nominal(), -all_outcomes())
+```
+
+```{r}
+# Una vez creado el objeto recipe con todas las transformaciones de preprocesado, se aprende con los datos de entrenamiento y se aplican a los dos conjuntos.
+
+trained_recipe <- prep(objeto_recipe, training = training)
+trained_recipe
+```
+
+```{r}
+#set de datos de training y testing procesado (estandarizado y binarizado)
+datos_train_prep <- bake(trained_recipe, new_data = training)
+datos_test_prep  <- bake(trained_recipe, new_data = testing)
+```
+
+## Selección de variables. Recursive Feature Elimination (RFE).
+```{r, eval=FALSE}
+# Se crea un control de entrenamiento donde se define el tipo de modelo empleado
+# para la selección de variables, en este caso random forest, la estrategia de
+# repeated cross validation con k = 10  y 2 repeticiones. Con el argumento returnResamp = "all" se especifica que se
+# almacene la información de todos los modelos generados en todas las repeticiones.
+
+tic <- Sys.time()
+
+# Tamaño de los conjuntos de predictores analizados
+subsets <- c(1:41)
+
+set.seed(100)
+ctrl_rfe <- rfeControl(functions = rfFuncs,
+                       method = "repeatedcv",
+                       number = 10,
+                       repeats = 2,
+                       returnResamp = "all",
+                       allowParallel = TRUE,
+                       verbose = FALSE)
+
+
+# Se ejecuta la eliminación recursiva de predictores
+set.seed(342)
+rf_rfe <- rfe(log_ingreso ~ ., data = datos_train_prep,
+              sizes = subsets,
+              metric = "RMSE",
+              rfeControl = ctrl_rfe,
+              ntree = 500)
+toc <- Sys.time()
+
+print(toc-tic)
+
+# Time difference of 7.150184 hours (i7 16gb RAM 500gb SSD)
+```
+
+```{r, eval=FALSE}
+#Guardamos el rf_rfe
+saveRDS(rf_rfe, "modelos/rf_rfe.RDS")
+```
+
+```{r}
+#Se carga el rf_rfe
+rf_rfe <- readRDS("modelos/rf_rfe.RDS")
+```
+
+```{r}
+rf_rfe
+```
+
+Se identifica como mejor modelo al formado por 26 predictores. Además, muestra las 5 variables con mayor influencia:
+Categoria_ocup_Obrero.o.empleado, Total_horas, Sexo_Varon, Calificacion_No.calificados, Tipo_Privado
+
+A continuación, se calculan las métricas del proceso de rfe().
+```{r}
+rf_rfe$results %>%
+  dplyr::select(1:2)
+```
+
+
+```{r}
+rf_rfe$resample %>% 
+  group_by(Variables) %>%
+  summarise(media_RMSE = mean(RMSE)) %>%
+  arrange(desc(media_RMSE))
+
+#misma tabla que muestra rfe
+```
+
+
+```{r, fig.width=9}
+# Evolución del RMSE estimado en función del número de predictores incluido en el modelo.
+
+g_rfe <- ggplot(data = rf_rfe$results, aes(x = Variables, y = RMSE)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = RMSE - RMSESD, ymax = RMSE + RMSESD),
+                width = 0.2) +
+  geom_point(data = rf_rfe$results
+             %>% slice(which.min(RMSE)),
+             color = "red") +
+  labs(title = "Gráfico 8. Evoución del RMSE en función del número de predictores",
+         x = "Predictores",
+         y= "RMSE (Repeated Cross Validation)") + theme_bw() +
+  theme(plot.title = element_text(size = 13, face = "bold"))
+
+
+ggsave("graficos/g_rfe.jpg", g_rfe)
+
+```
+
+```{r}
+#Ranking de importancia promedio de cada predictor para el modelo. Da mismo rdos que results$optVariables
+tabla_predictores <- rf_rfe$variables %>%
+  group_by(var) %>%
+  summarise(media_influencia = mean(Overall)) %>%
+            arrange(desc(media_influencia)) %>% 
+  top_n(26, media_influencia)
+
+flextable((tabla_predictores), 
+  col_keys = names(tabla_predictores)) %>% 
+  add_header_lines(.,values = c("Cuadro 22. 26 Predictores más influyentes estimados mediante RFE."))%>% 
+  add_footer_lines(., "Fuente: EPH 2º Trimestre 2020") %>% 
+  set_table_properties(., layout = "autofit")
+
+```
+
+## Creación de Modelos
+
+### Regresión lineal múltiple
+```{r, message=FALSE}
+mod_lm <- train(
+  log_ingreso ~ .,
+  data = datos_train_prep,
+  method = 'lm',
+  metric = 'RMSE',
+  trControl = ctrl)
+
+#summary(mod_lm)
+```
+A continuación, se busca reducir la dimensionalidad a partir de métodos de regularización: Ridge y Lasso regression
+
+### Lasso
+```{r}
+x <- model.matrix(log_ingreso ~., datos_train_prep)[,-1]
+
+y <- datos_train_prep$log_ingreso
+
+#Encontrar el lambda óptimo utilizando cross validation
+set.seed(123)
+cv <- cv.glmnet(x, y, alpha = 1) #alpha = 1 refiere a Lasso
+cv$lambda.min
+
+```
+
+```{r}
+mod_lasso <- train(
+  log_ingreso ~ .,
+  data = datos_train_prep,
+  method = 'glmnet',
+  metric = 'RMSE',
+  tuneGrid = expand.grid(alpha = 1, lambda = cv$lambda.min),
+  trControl = ctrl)
+
+# mod_lasso
+#coef(mod_lasso$finalModel, mod_lasso$finalModel$lambdaOpt)
+
+```
+
+```{r}
+x_ <- model.matrix(log_ingreso ~., datos_train_prep)[,-1]
+
+y_ <- datos_train_prep$log_ingreso
+
+#Encontrar el lambda óptimo utilizando cross validation
+set.seed(1234)
+cv_ <- cv.glmnet(x_, y_, alpha = 0) #alpha = 0 Ridge
+cv_$lambda.min
+```
+
+### Ridge
+```{r}
+mod_ridge <- train(
+  log_ingreso ~ .,
+  data = datos_train_prep,
+  method = 'glmnet',
+  metric = 'RMSE',
+  tuneGrid = expand.grid(alpha = 0, lambda = cv_$lambda.min),
+  trControl = ctrl) 
+
+# mod_ridge
+#coef(mod_ridge$finalModel, mod_ridge$finalModel$lambdaOpt)
+```
+
+
+```{r, eval = F }
+#Grafico de evolución de lambda en ridge y lasso
+
+#windows(width=9, height=6)
+jpeg("graficos/lambda.jpeg", quality = 75)
+par(mfrow = c(1, 2), oma=c(0,0,2,0))
+
+plot(cv_, ylab = "MSE (Repeated Cross Validation)")
+title("Ridge", line = -2)
+
+plot(cv, ylab = "MSE (Repeated Cross Validation)")
+title("Lasso", line = -2)
+
+mtext("Gráfico 9. Lambda óptimo para regresiones Ridge y Lasso.", line=0, side=3, outer=TRUE, cex=1.4, font = 2)
+
+#dev.off()
+
+```
+
+## Random Forest
+```{r}
+#RF sin tunear hiperparametros
+mod_rf_default <- train(
+  log_ingreso ~ ., 
+  data = datos_train_prep,
+  method = 'ranger',
+  metric = 'RMSE',
+  trControl = ctrl,
+  importance = "permutation") #para luego usar varImp()
+
+mod_rf_default$bestTune
+```
+
+```{r, eval=FALSE}
+#Tuneando hiperparámetros
+
+grilla_tuneo <- expand.grid(mtry = c(1:13), #por default, en regresiones mtry = p/3
+                            min.node.size=c(5,10,15,20,25),
+                            splitrule='variance') # es una opción para problemas de regresión
+
+tic <- Sys.time()
+
+mod_rf <- train(
+  log_ingreso ~ ., 
+  data = datos_train_prep,
+  method = 'ranger',
+  metric = 'RMSE',
+  trControl = ctrl,
+  tuneGrid = grilla_tuneo,
+  importance = "permutation") #para luego usar varImp()
+
+toc <- Sys.time()
+
+print(toc-tic) # 16.95131 mins mins mins i7 16gb RAM 500 SSD.
+
+saveRDS(mod_rf, "modelos/mod_rf_tun.RDS")
+```
+
+```{r}
+#Carga de rf
+mod_rf <- readRDS("modelos/mod_rf_tun.RDS")
+```
+
+```{r}
+mod_rf$bestTune
+```
+
+```{r}
+#Evolución del RMSE del modelo Random Forest
+
+g_random_forest <- ggplot(mod_rf, highlight = TRUE) +
+  scale_x_continuous(breaks = 1:14) +
+  labs(title = "Gráfico 10. Evolución del RMSE del modelo Random Forest",
+       x = "Número de predictores") +
+  guides(color = guide_legend(title = "Tamaño del nodo"),
+         shape = guide_legend(title = "Tamaño del nodo")) +
+  theme_bw() + theme(plot.title = element_text(size = 13, face = "bold")) +
+  theme(legend.position = "bottom")
+
+ggsave("graficos/g_randomforest.jpg", g_random_forest)
+```
+```{r}
+mod_rf$bestTune ## me da la respuesta de cual es el mejor tuneo, en este caso es un random forest con un argumento de mtry de 11 y min.node.size 25)
+```
+
+## CART
+```{r}
+grid <- expand.grid(maxdepth=c(1, 2, 4, 8, 16))
+
+
+mod_cart <- train(log_ingreso ~ ., 
+                 data = datos_train_prep,
+                 method = "rpart2",
+                 metric = 'RMSE',
+                 trControl = ctrl,
+                 tuneGrid =grid,
+                 control = rpart.control(cp=0.000001))
+
+mod_cart$bestTune
+```
+
+```{r}
+#Evolución del RMSE del modelo CART
+
+g_CART <- ggplot(mod_cart, highlight = TRUE) +
+  labs(title = "Gráfico 11. Evolución del RMSE del modelo CART",
+       x = "Máxima profundidad") +
+  theme_bw() + theme(plot.title = element_text(size = 13, face = "bold")) 
+
+ggsave("graficos/g_cart.jpg", g_CART)
+```
+
+## XGboost
+```{r, eval=FALSE}
+
+tic <- Sys.time()
+
+paramgrid_ <- expand.grid(nrounds = c(1000,1500),
+                         eta = c(0.01, 0.05),
+                         max_depth = c(2,4,6),
+                         colsample_bytree = c(0.5, 1),
+                         subsample = c(0.5,1),
+                         gamma = c(0,50),
+                         min_child_weight = c(0,20))
+
+mod_xgb_tun <- train(log_ingreso ~ .,
+                 data = datos_train_prep,
+                 method = "xgbTree",
+                 metric = 'RMSE',
+                 trControl = ctrl,
+                 tuneGrid=paramgrid_)
+
+toc <- Sys.time()
+
+print(toc-tic)# tiempo aprox 53.84494 I7 500 gb SSD y 16 gb RAM.
+
+saveRDS(mod_xgb_tun, "modelos/mod_xgb_tun.RDS")
+
+```
+
+```{r}
+#Carga de XGboost
+mod_xgb_tun <- readRDS("modelos/mod_xgb_tun.RDS")
+```
+
+```{r,}
+mod_xgb_tun$bestTune 
+```
+
+## Evaluación de modelos
+```{r}
+modelos <- list(Lineal= mod_lm, Cart = mod_cart, Ridge = mod_ridge, Lasso = mod_lasso,  Random_Forest_tuneado = mod_rf, Random_Forest_default = mod_rf_default, Xgboost_tuneado = mod_xgb_tun) 
+
+resamp <- resamples(modelos)  
+
+summary(resamp) #distintas métricas de ajuste (tiene cuenta los 10 k-folds para estimar cada métrica)
+
+#resamp$values 
+```
+
+
+```{r}
+metricas_resample <-  resamp$values %>%
+                         gather(key = "modelo", value = "valor", -Resample) %>%
+                         separate(col = "modelo", into = c("modelo", "metrica"),
+                                  sep = "~", remove = TRUE)
+metricas_resample %>% head()
+```
+
+
+```{r, fig.width= 9.8, fig.height=7}
+g_resamp1 <- metricas_resample %>%
+  filter(metrica == "RMSE") %>%
+  group_by(modelo) %>% 
+  summarise(media = mean(valor)) %>%
+  ggplot(aes(x = reorder(modelo, media), y = media, label = round(media, 3))) +
+    geom_segment(aes(x = reorder(modelo, -media), y = 0,
+                     xend = modelo, yend = media),
+                     color = "grey50") +
+    geom_point(size = 12, color = "firebrick") +
+    geom_text(color = "white", size = 3.5, fontface = "bold") +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(x = "Modelo",
+         y= "Media del RMSE") +
+    coord_flip() +
+    theme_bw() + theme(axis.text.y = element_text(size=12))
+
+
+g_resamp2 <- metricas_resample %>%
+  filter(metrica == "RMSE") %>%
+  group_by(modelo) %>% 
+  summarise(mediana = median(valor)) %>%
+  ggplot(aes(x = reorder(modelo, mediana), y = mediana, label = round(mediana, 3))) +
+    geom_segment(aes(x = reorder(modelo, -mediana), y = 0,
+                     xend = modelo, yend = mediana),
+                     color = "grey50") +
+    geom_point(size = 12, color = "firebrick") +
+    geom_text(color = "white", size = 3.5, fontface = "bold") +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(y = "Mediana del RMSE",
+         x= "Modelo") +
+    coord_flip() +
+    theme_bw() + theme(axis.text.y = element_text(size=12))
+
+gm_5 <- grid.arrange(g_resamp1, g_resamp2, ncol=2, nrow=1, widths = c(11,11), heights = c(9),
+                     top = textGrob("Gráfico 12. Validación: Media y mediana de RMSE (Repeated-CV).",
+     gp=gpar(fontsize=14, fontface ="bold"),
+     hjust = 0.7))
+                  
+
+ggsave("graficos/g_evaluacion.jpg", gm_5)
+
+```
+
+## Predicciones
+```{r}
+predicciones_rf <- predict(mod_rf, newdata = datos_test_prep) 
+predicciones_rf_def <- predict(mod_rf_default, newdata = datos_test_prep) 
+predicciones_cart <- predict(mod_cart, newdata = datos_test_prep)
+predicciones_lineal <- predict(mod_lm, newdata = datos_test_prep)
+predicciones_lasso <- predict(mod_lasso, newdata = datos_test_prep) 
+predicciones_ridge <- predict(mod_ridge, newdata = datos_test_prep) 
+predicciones_xgb <- predict(mod_xgb_tun, newdata = datos_test_prep) 
+
+prediccion_observados <- cbind(datos_test_prep, pred_rf = predicciones_rf,
+                                pred_cart = predicciones_cart,
+                                pred_lineal = predicciones_lineal,
+                                pred_lasso = predicciones_lasso,
+                                pred_ridge = predicciones_ridge,
+                                pred_xgb_tun = predicciones_xgb,
+                                pred_rf_def = predicciones_rf_def)
+
+predicciones_observados_visua <- prediccion_observados %>% 
+  dplyr::select(observados_log_ingreso = log_ingreso, pred_rf, pred_cart, pred_lineal, pred_lasso, pred_ridge, pred_xgb_tun, pred_rf_def)
+
+head(predicciones_observados_visua)
+
+```
+
+### Error de testing para cada modelo
+```{r}
+rmse_rf <- round(RMSE(predicciones_rf, datos_test_prep$log_ingreso),4)
+rmse_rf_def <- round(RMSE(predicciones_rf_def, datos_test_prep$log_ingreso),4)
+rmse_cart <- round(RMSE(predicciones_cart, datos_test_prep$log_ingreso),4)
+rmse_lasso <- round(RMSE(predicciones_lasso, datos_test_prep$log_ingreso),4)
+rmse_ridge <- round(RMSE(predicciones_ridge, datos_test_prep$log_ingreso),4)
+rmse_lineal <- round(RMSE(predicciones_lineal, datos_test_prep$log_ingreso),4)
+rmse_xgb <- round(RMSE(predicciones_xgb, datos_test_prep$log_ingreso),4)
+```
+
+
+```{r}
+#Cuadro resumen del RMSE train medio por modelo
+train_metric <- metricas_resample %>%
+  filter(metrica == "RMSE") %>%
+  group_by(modelo) %>% 
+  summarise(Train_RMSE = round(mean(valor),4))
+
+#Cuadro resumen del test RMSE medio por modelo
+Test_metric=data.frame(matrix(NA,ncol=1,nrow=7))
+rownames(Test_metric)=c("Random_Forest_tuneado", "Random_Forest_default","Cart","Lasso", "Ridge", "Lineal", "Xgboost_tuneado")
+colnames(Test_metric)=c("Test_RMSE")
+
+Test_metric[1,1]=rmse_rf
+Test_metric[2,1]=rmse_rf_def
+Test_metric[3,1]=rmse_cart
+Test_metric[4,1]=rmse_lasso
+Test_metric[5,1]=rmse_ridge
+Test_metric[6,1]=rmse_lineal
+Test_metric[7,1]=rmse_xgb
+
+library(tibble)
+Test_metric <- rownames_to_column(Test_metric, var="modelo") %>% 
+  arrange(Test_RMSE)
+
+#Tabla con error de training y de test de cada modelo
+tabla_comp <- left_join(train_metric, Test_metric, by = ("modelo"))
+
+```
+
+
+```{r}
+#Pivot de tabla comparativa para graficar más fácil
+tabla_comp_gra <- pivot_longer(tabla_comp, cols = c(Train_RMSE, Test_RMSE), names_to = "metric", values_to = "RMSE") 
+
+g_eval <- ggplot(data = tabla_comp_gra, aes(x = reorder(modelo, -RMSE), y = RMSE,
+                                            color = metric,
+                                           label = round(RMSE, 3))) +
+    geom_point(size = 12, alpha =0.8) +
+    scale_color_manual(labels = c("Test", "Train"),
+                       values = c("orangered2", "gray50")) +
+    geom_text(color = "white", size = 3.5, fontface = "bold") +
+    labs(title = "Gráfico 13. RMSE medio (Repeated-CV) de training y testing",
+         x = "Modelo",
+         y= "Media de RMSE") +
+       coord_flip() +
+    guides(color = guide_legend(title = "")) + 
+    theme_bw() +  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.35))+
+    theme(legend.position = "bottom")
+
+
+
+ggsave("graficos/g_evaluacion2.jpg", g_eval)
+
+```
+
+### Predichos vs. Observados (Random Forest y XGBoost)
+```{r}
+g_pred_obs <- predicciones_observados_visua %>% 
+  dplyr::select(observados_log_ingreso, pred_rf, pred_xgb_tun) %>% 
+  ggplot() +
+  geom_point(aes(x=pred_rf, y=observados_log_ingreso, color='Random Forest', alpha =0.1)) + 
+  geom_point(aes(x=pred_xgb_tun, y=observados_log_ingreso, color='XGboost', alpha = 0.1)) +
+  scale_color_brewer(palette = "Dark2") + 
+  geom_abline(slope = 1, intercept = 0, color = "steelblue", linetype = 1,size = 0.7) +
+        labs(title = "Gráfico 15. Predichos vs. Observados",
+          x = "Predichos",
+             y = "Observados",
+             color='Modelos') + 
+  guides (color =guide_legend(title = ""), alpha = F) + 
+  theme(plot.title = element_text(size = 13, face = "bold"))+
+  theme_bw() +  theme(legend.position = "bottom")
+
+ggsave("graficos/predichos_obs.jpg", g_pred_obs)
+
+```
+
+## Importancia de predictores en Xgboost
+```{r}
+var_imp <- varImp(mod_xgb_tun, scale = F, value = "rss")
+
+importancia_xgb <-as.data.frame(var_imp$importance) %>% 
+  rownames_to_column(var="Predictores") %>% 
+  arrange(desc(Overall)) %>% 
+  top_n(20)
+
+g_importancia <- ggplot(data = importancia_xgb, aes (y= reorder(Predictores,Overall), x = Overall, label = round(Overall, 3), fill = Predictores)) + 
+  geom_col() +
+  scale_fill_viridis_d(alpha = 0.5) +
+  geom_text(color = "black", size = 3.5, hjust = 1, fontface = "bold") + 
+  labs(title = "Gráfico 16. Importancia de predictores",
+         subtitle = "Top 20",
+         x = "Importancia",
+         y= "") +
+    guides(fill = FALSE) + 
+    theme_bw() +  theme(plot.title = element_text(size = 13, face = "bold"),
+                        plot.subtitle = element_text(size=12),
+                        axis.text.y = element_text(size=10))
+
+ggsave("graficos/g_importancia.jpg", g_importancia, width = 12, height = 8)
+
+```
+
+Para que sea más facil la interpretación (PDP, ICE  y LIME), se colapsan nuevamente las variables categóricas. Para LIME, particularmente, debe realizarse sino la función brinda datos inexactos. Se ajusta el modelo de Xgboost nuevamente con el df de training que tiene las variables numéricas sin estandarizar y las variables categóricas sin dummies, pero si está el log ingreso.
+
+
+```{r}
+tic <- Sys.time()
+
+paramgrid_ <- expand.grid(nrounds = c(1000,1500),
+                         eta = c(0.01, 0.05),
+                         max_depth = c(2,4,6),
+                         colsample_bytree = c(0.5, 1),
+                         subsample = c(0.5,1),
+                         gamma = c(0,50),
+                         min_child_weight = c(0,20))
+
+mod_xgb_tun_2 <- train(log_ingreso ~ .,
+                 data = training,
+                 method = "xgbTree",
+                 metric = 'RMSE',
+                 trControl = ctrl,
+                 tuneGrid=paramgrid_)
+
+toc <- Sys.time()
+
+print(toc-tic)# tiempo aprox 50 min I7 500 gb SSD y 16 gb RAM.
+
+saveRDS(mod_xgb_tun_2, "modelos/mod_xgb_tun_2.RDS")
+
+#los hiperparámetros elegidos son los mismos que en el modelo ajustado con anterioridad (mod_xgb_tun). No hay cambios en el ajuste.
+```
+
+## Partial Dependence Plot (PDP)
+```{r}
+g_pdp_horas <- mod_xgb_tun_2 %>%
+        partial(pred.var='Total_horas') %>%
+        ggplot(aes(x=Total_horas, y=yhat)) +
+                geom_line() +
+                geom_smooth(se=FALSE) +
+  scale_x_continuous(breaks = c(0,25,50,75,100,125,150))+
+  labs(y = "Log(Ingreso) predicho",
+       x = "Horas trabajadas en semana anterior") +
+  theme_bw() 
+
+
+g_pdp_edad <- mod_xgb_tun_2 %>%
+        partial(pred.var='Edad') %>%
+        ggplot(aes(x=Edad, y=yhat)) +
+                geom_line() +
+                geom_smooth(se=FALSE) +
+  labs(y = "Log(Ingreso) predicho") +
+  theme_bw() 
+
+g_pdp_educ <- mod_xgb_tun_2 %>%
+        partial(pred.var='Nivel_ed') %>%
+        ggplot(aes(x=Nivel_ed, y=yhat, fill = Nivel_ed)) +
+        geom_bar(stat='identity') +
+  scale_fill_brewer(type = "qual", palette = "Dark2") +
+  labs(y = "Log(Ingreso) predicho",
+       x = "Nivel educativo") +
+  theme_bw() + guides(fill = F)
+
+g_pdp_sexo <- mod_xgb_tun_2 %>%
+        partial(pred.var='Sexo') %>%
+        ggplot(aes(x=Sexo, y=yhat, fill = Sexo)) +
+        geom_bar(stat='identity') +
+  labs(y = "Log(Ingreso) predicho",
+       x = "Sexo") +
+  theme_bw() + guides(fill = F)
+
+
+gm_6 <- grid.arrange(g_pdp_horas, g_pdp_edad, g_pdp_educ, g_pdp_sexo, ncol=2, nrow=2, widths = c(10,10), heights = c(7,7),
+                     top = textGrob("Gráfico 17. Partial Dependence Plots",
+     gp=gpar(fontsize=13, fontface ="bold"),
+     hjust = 1))
+                  
+ggsave("graficos/pdp_horas_edad.jpg", gm_6)
+```
+
+## Individual Conditional Expectation (ICE)
+```{r}
+
+g_ice_horas <- partial(mod_xgb_tun_2, pred.var='Total_horas' , ice=TRUE) %>%
+  autoplot(rug = TRUE, train = training, alpha = .05) + 
+  labs(y = "Log(Ingreso) predicho") +
+  theme_bw() 
+  
+g_ice_edad <- partial(mod_xgb_tun_2, pred.var='Edad' , ice=TRUE) %>%
+  autoplot(rug = TRUE, train = training, alpha = .05) + 
+  labs(y = "Log(Ingreso) predicho") +
+  theme_bw() 
+  
+
+gm_6 <- grid.arrange(g_ice_horas, g_ice_edad, ncol=2, nrow=1, widths = c(8,8), heights = c(7),
+                     top = textGrob("Gráfico 18. Individual Conditional Expectation: Total_horas y Edad",
+     gp=gpar(fontsize=14, fontface ="bold"),
+     hjust = 0.6))
+                  
+
+ggsave("graficos/g_ice.jpg", gm_6)
+
+```
+
+##LIME
+```{r}
+explainer <- lime(data.frame(training), mod_xgb_tun_2) ## le paso al explicador la propuesta de datos y modelo
+explanation <- explain(testing[1:3, ], explainer, n_features = 5,
+                       feature_select = "highest_weights",
+                       kernel_width = .75) ## le pido que me muestre los valores que tuvo en cuenta de las 
+plot_features(explanation, ncol = 1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
